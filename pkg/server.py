@@ -1,16 +1,12 @@
 import logging
-import sys
 import time
-import argparse
 from functools import partial
 from pathlib import Path
 import os
-import signal
 import threading
 import shutil
 import asyncio
 import concurrent.futures
-import uuid
 from typing import Optional
 
 import ujson
@@ -23,8 +19,6 @@ from pkg.query import run_duckdb
 
 logger = logging.getLogger(__name__)
 
-BUNDLE_DIR = Path(".sqlrooms/bundle")
-SLOW_QUERY_THRESHOLD = 5 * 60 * 1000  # 5 minutes in milliseconds
 
 # Flag to track if shutdown has been requested
 shutdown_requested = False
@@ -154,11 +148,7 @@ async def handle_query(handler: Handler, cache, query, query_id: Optional[str] =
     # Use client-provided query_id if present
     if query_id is None:
         query_id = query.get("queryId") or db_async.generate_query_id()
-    # Check if SQL query starts with "INSERT INTO fsq_spatial.config"
-    if "sql" in query and query["sql"].strip().startswith("INSERT INTO fsq_spatial.config"):
-        logger.debug(f"<Saving fsq_spatial.config> (query_id: {query_id})")
-    else:
-        logger.debug(f"query={query} (query_id: {query_id})")
+    logger.debug(f"query={query} (query_id: {query_id})")
     # Check if shutdown has been requested - don't process new queries
     if shutdown_requested:
         logger.warning("Rejecting query because shutdown has been requested")
@@ -247,10 +237,7 @@ async def handle_query(handler: Handler, cache, query, query_id: Optional[str] =
         logger.exception(f"Error processing query: {str(e)}")
         await handler.error(e) if hasattr(handler.error, '__await__') else handler.error(e)
     total = round((time.time() - start) * 1_000)
-    if total > SLOW_QUERY_THRESHOLD:
-        logger.warning(f"DONE. Slow query took {total} ms.")
-    else:
-        logger.info(f"DONE. Query took {total} ms.")
+    logger.info(f"DONE. Query took {total} ms.")
 
 class DuckDBResource:
     def __init__(self, cache):
@@ -479,10 +466,6 @@ def create_app(cache):
     app.add_route('/cancel', CancelQueryResource(cache))
     app.add_route('/shutdown', ShutdownResource(cache))
     app.add_route('/connection', ConnectionManagementResource())
-    # Dynamic tile endpoint: /dynamic-tile/:tableName/:columnName/:z/:x/:y
-    from .dynamic_tile import DynamicTileResource, DynamicTileMetadataResource
-    app.add_route('/dynamic-tile/{tableName}/{columnName}/{z:int}/{x:int}/{y:int}', DynamicTileResource(cache))
-    app.add_route('/dynamic-tile/{tableName}/{columnName}/metadata.json', DynamicTileMetadataResource())
 
     return app
 

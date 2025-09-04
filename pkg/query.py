@@ -99,24 +99,6 @@ async def run_duckdb(cache, query, query_id: Optional[str] = None):
         elif command == "insertArrowFile":
             insert_table_from_arrow_file(con, query)
             return {"type": "done"}
-        elif command == "create-bundle":
-            # BUNDLE_DIR is resolved in server previously; keep logic there if needed.
-            from pathlib import Path
-            BUNDLE_DIR = Path(".sqlrooms/bundle")
-            from pkg.bundle import create_bundle, load_bundle
-            create_bundle(
-                con, cache, query.get("queries"), BUNDLE_DIR / query.get("name")
-            )
-            return {"type": "done"}
-        elif command == "load-bundle":
-            from pathlib import Path
-            BUNDLE_DIR = Path(".sqlrooms/bundle")
-            from pkg.bundle import create_bundle, load_bundle
-            load_bundle(con, cache, BUNDLE_DIR / query.get("name"))
-            return {"type": "done"}
-        elif command == "saveProjectAs":
-            # This command needs special handling since it modifies the global connection
-            raise ValueError("saveProjectAs command requires special handling and should not use thread-local cursors")
         else:
             raise ValueError(f"Unknown command {command}")
 

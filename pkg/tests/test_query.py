@@ -3,14 +3,8 @@ from functools import partial
 import duckdb
 import pyarrow as pa
 
-from pkg.query import get_arrow, get_json, get_key
+from pkg.query import get_arrow, get_json
 
-
-def test_key():
-    assert (
-        get_key("SELECT 1", "arrow")
-        == "e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5.arrow"
-    )
 
 
 def test_query_json():
