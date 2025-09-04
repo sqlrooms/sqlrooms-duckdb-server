@@ -13,9 +13,11 @@ dependencies = [
   "pyarrow",
   "ujson",
   "mapbox-vector-tile",
-  "mercantile",
-  "pyproj"
+  "pyproj",
 ]
+
+[project.optional-dependencies]
+test = ["aiohttp>=3.9"]
 
 [project.scripts]
 sqlrooms-duckdb-server = "pkg.__main__:serve"
