@@ -2,7 +2,7 @@
 
 [![PyPi](https://img.shields.io/pypi/v/sqlrooms-duckdb-server.svg)](https://pypi.org/project/sqlrooms-duckdb-server/)
 
-A Python-based server that runs a local DuckDB instance and supports queries over HTTP or Web Sockets, returning data in either [Apache Arrow](https://arrow.apache.org/) or JSON format. The server supports query cancellation.
+A Python-based DuckDB server for [SQLRooms](https://sqlrooms.org). The server runs a local DuckDB instance and supports queries over HTTP or Web Sockets, returning data in either [Apache Arrow](https://arrow.apache.org/) or JSON format. The server supports query cancellation.
 
 > **Note:** This server was initially created as a fork of [Mosaic DuckDB Server](https://github.com/uwdata/mosaic/tree/main/packages/server/duckdb-server), with additional features and improvements.
 
