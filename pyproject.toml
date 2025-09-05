@@ -12,8 +12,6 @@ dependencies = [
   "pandas",
   "pyarrow",
   "ujson",
-  "mapbox-vector-tile",
-  "pyproj",
 ]
 
 [project.optional-dependencies]
