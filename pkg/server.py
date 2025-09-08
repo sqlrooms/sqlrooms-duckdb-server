@@ -11,9 +11,8 @@ from typing import Optional, Callable, Any
 
 import ujson
 import json
-import falcon.asgi
-from falcon import Request, Response, WebSocketDisconnected
-from falcon.asgi import WebSocket
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 
 from pkg.query import run_duckdb
 
@@ -68,7 +67,7 @@ class WebSocketHandler(Handler):
     def done(self):
         pass
     async def arrow(self, buffer):
-        await self.ws.send_data(buffer)
+        await self.ws.send_bytes(buffer)
     async def json(self, data):
         await self.ws.send_text(data)
     async def error(self, error):
@@ -78,23 +77,19 @@ class HTTPHandler(Handler):
     def __init__(self, resp):
         self.resp = resp
     def done(self):
-        self.resp.text = ""
+        self.resp.media_type = "text/plain"
+        self.resp.body = b""
     def arrow(self, buffer):
-        self.resp.content_type = "application/octet-stream"
-        self.resp.data = buffer
-        if hasattr(self.resp, 'text'):
-            self.resp.text = None
+        self.resp.media_type = "application/octet-stream"
+        self.resp.body = buffer
     def json(self, data):
-        self.resp.content_type = "application/json"
-        self.resp.text = data
-        if hasattr(self.resp, 'data'):
-            self.resp.data = None
+        self.resp.media_type = "application/json"
+        # data is a JSON string; FastAPI Response expects bytes
+        self.resp.body = data.encode("utf-8")
     def error(self, error):
-        self.resp.status = falcon.HTTP_400
-        self.resp.content_type = "application/json"
-        self.resp.text = make_error_response("QUERY_ERROR", str(error))
-        if hasattr(self.resp, 'data'):
-            self.resp.data = None
+        self.resp.status_code = 400
+        self.resp.media_type = "application/json"
+        self.resp.body = make_error_response("QUERY_ERROR", str(error)).encode("utf-8")
 
 def deactivate_backend(cache) -> None:
     """Temporarily deactivate the backend for a connection change.
@@ -268,63 +263,88 @@ async def handle_query(handler: Handler, cache, query, query_id: Optional[str] =
         await handler.error(e) if hasattr(handler.error, '__await__') else handler.error(e)
     total = round((time.time() - start) * 1_000)
     logger.info(f"DONE. Query took {total} ms.")
+    
+# For backward compatibility for callers importing from pkg.server
+init_global_connection = db_async.init_global_connection
 
-class DuckDBResource:
-    def __init__(self, cache, custom_handler: Optional[Callable[..., Any]] = None):
-        self.cache = cache
-        self.custom_handler = custom_handler
-    async def on_post(self, req: Request, resp: Response):
+def create_app(cache, *, custom_handler: Optional[Callable[..., Any]] = None):
+    app = FastAPI()
+
+    # Enable CORS similar to falcon.asgi.App(cors_enable=True)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.post("/")
+    async def root_post(request: Request, response: Response):
         try:
-            data = await req.media
-            # Use client-provided queryId if present
+            data = await request.json()
             query_id = data.get("queryId") or db_async.generate_query_id()
-            # Create a custom handler that can add the query ID to the response
+
             class QueryTrackingHandler(HTTPHandler):
-                def __init__(self, resp, query_id):
+                def __init__(self, resp: Response, query_id: str):
                     super().__init__(resp)
                     self.query_id = query_id
                 def done(self):
-                    self.resp.set_header('X-Query-ID', self.query_id)
+                    self.resp.headers['X-Query-ID'] = self.query_id
                     super().done()
                 def arrow(self, buffer):
-                    self.resp.set_header('X-Query-ID', self.query_id)
+                    self.resp.headers['X-Query-ID'] = self.query_id
                     super().arrow(buffer)
                 def json(self, data):
-                    self.resp.set_header('X-Query-ID', self.query_id)
+                    self.resp.headers['X-Query-ID'] = self.query_id
                     super().json(data)
                 def error(self, error):
-                    self.resp.set_header('X-Query-ID', self.query_id)
+                    self.resp.headers['X-Query-ID'] = self.query_id
                     super().error(error)
-            handler = QueryTrackingHandler(resp, query_id)
-            await handle_query(handler, self.cache, data, query_id, custom_handler=self.custom_handler)
+
+            handler = QueryTrackingHandler(response, query_id)
+            await handle_query(handler, cache, data, query_id, custom_handler=custom_handler)
+            return response
         except Exception as e:
             logger.exception(f"Error handling POST request: {str(e)}")
-            resp.status = falcon.HTTP_400
-            resp.content_type = "application/json"
-            resp.text = make_error_response("REQUEST_ERROR", str(e))
-    async def on_get(self, req: Request, resp: Response):
+            response.status_code = 400
+            response.media_type = "application/json"
+            response.body = make_error_response("REQUEST_ERROR", str(e)).encode("utf-8")
+            return response
+
+    @app.get("/")
+    async def root_get(request: Request, response: Response, query: Optional[str] = None):
         try:
-            query_string = req.get_param("query")
+            query_string = query
             if not query_string:
-                resp.status = falcon.HTTP_400
-                resp.text = "Missing 'query' parameter"
-                return
+                response.status_code = 400
+                response.media_type = "text/plain"
+                response.body = b"Missing 'query' parameter"
+                return response
             try:
                 data = json.loads(query_string)
-                handler = HTTPHandler(resp)
-                await handle_query(handler, self.cache, data, custom_handler=self.custom_handler)
+                handler = HTTPHandler(response)
+                await handle_query(handler, cache, data, custom_handler=custom_handler)
+                return response
             except json.JSONDecodeError as e:
                 logger.exception(f"Invalid JSON in query parameter: {str(e)}")
-                resp.status = falcon.HTTP_400
-                resp.text = f"Invalid JSON in 'query' parameter: {str(e)}"
+                response.status_code = 400
+                response.media_type = "text/plain"
+                response.body = f"Invalid JSON in 'query' parameter: {str(e)}".encode("utf-8")
+                return response
         except Exception as e:
             logger.exception(f"Error handling GET request: {str(e)}")
-            resp.status = falcon.HTTP_400
-            resp.content_type = "application/json"
-            resp.text = make_error_response("REQUEST_ERROR", str(e))
-    async def on_options(self, req: Request, resp: Response):
-        resp.status = falcon.HTTP_200
-    async def on_websocket(self, req: Request, ws: WebSocket):
+            response.status_code = 400
+            response.media_type = "application/json"
+            response.body = make_error_response("REQUEST_ERROR", str(e)).encode("utf-8")
+            return response
+
+    @app.options("/")
+    async def root_options():
+        return Response(status_code=200)
+
+    @app.websocket("/")
+    async def websocket_endpoint(ws: WebSocket):
         await ws.accept()
         try:
             while True:
@@ -332,74 +352,65 @@ class DuckDBResource:
                 try:
                     query = ujson.loads(message)
                     handler = WebSocketHandler(ws)
-                    await handle_query(handler, self.cache, query, custom_handler=self.custom_handler)
+                    await handle_query(handler, cache, query, custom_handler=custom_handler)
                 except Exception as e:
                     logger.exception("Error processing WebSocket message")
                     await ws.send_text(json.dumps({"error": str(e)}))
-        except WebSocketDisconnected:
+        except WebSocketDisconnect:
             logger.info("WebSocket disconnected")
 
-class CancelQueryResource:
-    def __init__(self, cache):
-        self.cache = cache
-    async def on_post(self, req: Request, resp: Response):
+    @app.post("/cancel")
+    async def cancel_query(request: Request, response: Response):
         try:
-            data = await req.media
+            data = await request.json()
             query_id = data.get("queryId")
             if not query_id:
-                resp.status = falcon.HTTP_400
-                resp.content_type = "application/json"
-                resp.text = make_error_response("MISSING_QUERY_ID", "Missing queryId in request")
-                return
+                response.status_code = 400
+                response.media_type = "application/json"
+                response.body = make_error_response("MISSING_QUERY_ID", "Missing queryId in request").encode("utf-8")
+                return response
             logger.info(f"Received cancellation request for query {query_id}")
             success = db_async.cancel_query(query_id)
             if success:
-                resp.status = falcon.HTTP_200
-                resp.content_type = "application/json"
-                resp.text = json.dumps({"success": True, "message": f"Query {query_id} cancelled successfully"})
+                response.status_code = 200
+                response.media_type = "application/json"
+                response.body = json.dumps({"success": True, "message": f"Query {query_id} cancelled successfully"}).encode("utf-8")
             else:
-                resp.status = falcon.HTTP_404
-                resp.content_type = "application/json"
-                resp.text = make_error_response("QUERY_NOT_FOUND", f"Query {query_id} not found or already completed")
+                response.status_code = 404
+                response.media_type = "application/json"
+                response.body = make_error_response("QUERY_NOT_FOUND", f"Query {query_id} not found or already completed").encode("utf-8")
+            return response
         except Exception as e:
             logger.exception(f"Error cancelling query: {str(e)}")
-            resp.status = falcon.HTTP_500
-            resp.content_type = "application/json"
-            resp.text = make_error_response("CANCEL_ERROR", str(e))
+            response.status_code = 500
+            response.media_type = "application/json"
+            response.body = make_error_response("CANCEL_ERROR", str(e)).encode("utf-8")
+            return response
 
-class ShutdownResource:
-    def __init__(self, cache):
-        self.cache = cache
-    async def on_post(self, req: Request, resp: Response):
+    @app.post("/shutdown")
+    async def shutdown_endpoint(request: Request, response: Response):
         global shutdown_requested
         try:
             logger.info("Received shutdown request, preparing for graceful shutdown")
             try:
-                # Mark for shutdown but don't close yet
                 shutdown_requested = True
-                # Cancel all active queries
                 db_async.cancel_all_queries()
-                # Clear the cache
-                if self.cache:
+                if cache:
                     logger.info("Clearing cache...")
-                    self.cache.clear()
+                    cache.clear()
                     logger.info("Cache cleared successfully")
-                # Schedule the server to stop in a short while
+
                 def delayed_shutdown():
                     logger.info("Performing delayed shutdown...")
                     if db_async.GLOBAL_CON:
                         try:
-                            # Force checkpoint to ensure all data is written to main DB file, not WAL
                             logger.info("Forcing checkpoint to flush WAL to main database file...")
                             db_async.GLOBAL_CON.execute("FORCE CHECKPOINT")
                             logger.info("Checkpoint completed successfully")
-                            # Give DuckDB a brief moment to finalize WAL cleanup
                             _wait_for_wal_disappear(db_async.DATABASE_PATH)
                             logger.info("Closing global DuckDB connection...")
                             db_async.GLOBAL_CON.close()
                             logger.info("DuckDB connection closed successfully")
-
-                            # Best-effort: remove any remaining WAL file
                             try:
                                 if db_async.DATABASE_PATH:
                                     wal_path = f"{db_async.DATABASE_PATH}.wal"
@@ -414,33 +425,32 @@ class ShutdownResource:
                                 logger.error(f"WAL cleanup error (ignored): {e2}")
                         except Exception as e:
                             logger.exception(f"Error during connection cleanup: {str(e)}")
-                    # Shut down shared executor to release threads
                     db_async.shutdown_executor(wait=False)
                     logger.info("Exiting process gracefully...")
                     time.sleep(0.5)
                     os._exit(0)
+
                 threading.Timer(1.0, delayed_shutdown).start()
-                resp.status = falcon.HTTP_200
-                resp.content_type = "application/json"
-                resp.text = json.dumps({"success": True, "message": "Graceful shutdown initiated"})
+                response.status_code = 200
+                response.media_type = "application/json"
+                response.body = json.dumps({"success": True, "message": "Graceful shutdown initiated"}).encode("utf-8")
             except Exception as e:
                 logger.exception(f"Error during graceful shutdown: {str(e)}")
-                resp.status = falcon.HTTP_500
-                resp.content_type = "application/json"
-                resp.text = make_error_response("SHUTDOWN_ERROR", str(e))
+                response.status_code = 500
+                response.media_type = "application/json"
+                response.body = make_error_response("SHUTDOWN_ERROR", str(e)).encode("utf-8")
+            return response
         except Exception as e:
             logger.exception(f"Unexpected error during shutdown: {str(e)}")
-            resp.status = falcon.HTTP_500
-            resp.content_type = "application/json"
-            resp.text = make_error_response("SERVER_ERROR", str(e))
+            response.status_code = 500
+            response.media_type = "application/json"
+            response.body = make_error_response("SERVER_ERROR", str(e)).encode("utf-8")
+            return response
 
-class ConnectionManagementResource:
-    """Resource for managing DuckDB connection during file operations on Windows since duckdb will lock the file to prevent any file operations"""
-
-    async def on_post(self, req: Request, resp: Response):
-        # manipulate connection via db_async module to ensure shared state
+    @app.post("/connection")
+    async def connection_management(request: Request, response: Response):
         try:
-            data = await req.get_media()
+            data = await request.json()
             action = data.get("action")
 
             if action == "close":
@@ -449,21 +459,21 @@ class ConnectionManagementResource:
                     db_async.GLOBAL_CON.close()
                     db_async.GLOBAL_CON = None
                     logger.info("DuckDB connection closed successfully")
-                    resp.status = falcon.HTTP_200
-                    resp.content_type = "application/json"
-                    resp.text = json.dumps({"success": True, "message": "Connection closed"})
+                    response.status_code = 200
+                    response.media_type = "application/json"
+                    response.body = json.dumps({"success": True, "message": "Connection closed"}).encode("utf-8")
                 else:
-                    resp.status = falcon.HTTP_200
-                    resp.content_type = "application/json"
-                    resp.text = json.dumps({"success": True, "message": "Connection already closed"})
+                    response.status_code = 200
+                    response.media_type = "application/json"
+                    response.body = json.dumps({"success": True, "message": "Connection already closed"}).encode("utf-8")
 
             elif action == "reopen":
                 db_path = data.get("dbPath")
                 if not db_path:
-                    resp.status = falcon.HTTP_400
-                    resp.content_type = "application/json"
-                    resp.text = make_error_response("MISSING_PATH", "dbPath is required for reopening connection")
-                    return
+                    response.status_code = 400
+                    response.media_type = "application/json"
+                    response.body = make_error_response("MISSING_PATH", "dbPath is required for reopening connection").encode("utf-8")
+                    return response
 
                 if db_async.GLOBAL_CON:
                     logger.info("Closing existing connection before reopening...")
@@ -474,34 +484,26 @@ class ConnectionManagementResource:
                 db_async.init_global_connection(db_path)
                 logger.info("DuckDB connection reopened successfully")
 
-                resp.status = falcon.HTTP_200
-                resp.content_type = "application/json"
-                resp.text = json.dumps({"success": True, "message": "Connection reopened"})
+                response.status_code = 200
+                response.media_type = "application/json"
+                response.body = json.dumps({"success": True, "message": "Connection reopened"}).encode("utf-8")
             else:
-                resp.status = falcon.HTTP_400
-                resp.content_type = "application/json"
-                resp.text = make_error_response("INVALID_ACTION", f"Invalid action: {action}")
+                response.status_code = 400
+                response.media_type = "application/json"
+                response.body = make_error_response("INVALID_ACTION", f"Invalid action: {action}").encode("utf-8")
 
+            return response
         except Exception as e:
             logger.exception(f"Error in connection management: {str(e)}")
-            resp.status = falcon.HTTP_500
-            resp.content_type = "application/json"
-            resp.text = make_error_response("CONNECTION_ERROR", str(e))
-
-# For backward compatibility for callers importing from pkg.server
-init_global_connection = db_async.init_global_connection
-
-def create_app(cache, *, custom_handler: Optional[Callable[..., Any]] = None):
-    app = falcon.asgi.App(cors_enable=True)
-    app.add_route('/', DuckDBResource(cache, custom_handler))
-    app.add_route('/cancel', CancelQueryResource(cache))
-    app.add_route('/shutdown', ShutdownResource(cache))
-    app.add_route('/connection', ConnectionManagementResource())
+            response.status_code = 500
+            response.media_type = "application/json"
+            response.body = make_error_response("CONNECTION_ERROR", str(e)).encode("utf-8")
+            return response
 
     return app
 
 def server(cache, port=4000):
     import uvicorn
     app = create_app(cache)
-    logger.info(f"Falcon DuckDB Server listening at ws://localhost:{port} and http://localhost:{port}")
+    logger.info(f"FastAPI DuckDB Server listening at ws://localhost:{port} and http://localhost:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
