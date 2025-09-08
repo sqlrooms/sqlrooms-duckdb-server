@@ -7,7 +7,7 @@ import threading
 import shutil
 import asyncio
 import concurrent.futures
-from typing import Optional
+from typing import Optional, Callable, Any
 
 import ujson
 import json
@@ -143,7 +143,7 @@ def activate_backend(new_database_path: str) -> None:
     # Resume accepting queries
     shutdown_requested = False
 
-async def handle_query(handler: Handler, cache, query, query_id: Optional[str] = None):
+async def handle_query(handler: Handler, cache, query, query_id: Optional[str] = None, custom_handler: Optional[Callable[..., Any]] = None):
     global shutdown_requested
     # Use client-provided query_id if present
     if query_id is None:
@@ -164,6 +164,36 @@ async def handle_query(handler: Handler, cache, query, query_id: Optional[str] =
                 logger.debug(f"SQL query first 200 chars: {sql[:200]}... (query_id: {query_id})")
             else:
                 logger.debug(f"Full SQL query: {sql} (query_id: {query_id})")
+        # First, allow a custom handler to intercept/handle commands
+        if custom_handler is not None:
+            try:
+                maybe_result = custom_handler(handler, cache, query, query_id)
+                if asyncio.iscoroutine(maybe_result):
+                    maybe_result = await maybe_result
+                # Contract:
+                # - If returns True -> already responded using handler, stop here
+                # - If returns a dict with "type" -> send like run_duckdb result and stop
+                # - Otherwise (None/False) -> fall through to built-ins
+                if maybe_result is True:
+                    return
+                if isinstance(maybe_result, dict) and isinstance(maybe_result.get("type"), str):
+                    rtype = maybe_result["type"]
+                    if rtype == "done":
+                        handler.done()
+                    elif rtype == "arrow":
+                        data = maybe_result.get("data")
+                        await handler.arrow(data) if hasattr(handler.arrow, '__await__') else handler.arrow(data)
+                    elif rtype == "json":
+                        data = maybe_result.get("data")
+                        await handler.json(data) if hasattr(handler.json, '__await__') else handler.json(data)
+                    else:
+                        raise ValueError(f"Unknown custom handler result type: {rtype}")
+                    return
+            except Exception as e:
+                logger.exception(f"Error in custom handler for command '{command}' (query_id: {query_id}): {str(e)}")
+                await handler.error(e) if hasattr(handler.error, '__await__') else handler.error(e)
+                return
+
         # Handle saveProjectAs separately since it needs to modify the global connection
         if command == "saveProjectAs":
             source_path = query.get("sourcePath")
@@ -240,8 +270,9 @@ async def handle_query(handler: Handler, cache, query, query_id: Optional[str] =
     logger.info(f"DONE. Query took {total} ms.")
 
 class DuckDBResource:
-    def __init__(self, cache):
+    def __init__(self, cache, custom_handler: Optional[Callable[..., Any]] = None):
         self.cache = cache
+        self.custom_handler = custom_handler
     async def on_post(self, req: Request, resp: Response):
         try:
             data = await req.media
@@ -265,7 +296,7 @@ class DuckDBResource:
                     self.resp.set_header('X-Query-ID', self.query_id)
                     super().error(error)
             handler = QueryTrackingHandler(resp, query_id)
-            await handle_query(handler, self.cache, data, query_id)
+            await handle_query(handler, self.cache, data, query_id, custom_handler=self.custom_handler)
         except Exception as e:
             logger.exception(f"Error handling POST request: {str(e)}")
             resp.status = falcon.HTTP_400
@@ -281,7 +312,7 @@ class DuckDBResource:
             try:
                 data = json.loads(query_string)
                 handler = HTTPHandler(resp)
-                await handle_query(handler, self.cache, data)
+                await handle_query(handler, self.cache, data, custom_handler=self.custom_handler)
             except json.JSONDecodeError as e:
                 logger.exception(f"Invalid JSON in query parameter: {str(e)}")
                 resp.status = falcon.HTTP_400
@@ -301,7 +332,7 @@ class DuckDBResource:
                 try:
                     query = ujson.loads(message)
                     handler = WebSocketHandler(ws)
-                    await handle_query(handler, self.cache, query)
+                    await handle_query(handler, self.cache, query, custom_handler=self.custom_handler)
                 except Exception as e:
                     logger.exception("Error processing WebSocket message")
                     await ws.send_text(json.dumps({"error": str(e)}))
@@ -460,9 +491,9 @@ class ConnectionManagementResource:
 # For backward compatibility for callers importing from pkg.server
 init_global_connection = db_async.init_global_connection
 
-def create_app(cache):
+def create_app(cache, *, custom_handler: Optional[Callable[..., Any]] = None):
     app = falcon.asgi.App(cors_enable=True)
-    app.add_route('/', DuckDBResource(cache))
+    app.add_route('/', DuckDBResource(cache, custom_handler))
     app.add_route('/cancel', CancelQueryResource(cache))
     app.add_route('/shutdown', ShutdownResource(cache))
     app.add_route('/connection', ConnectionManagementResource())

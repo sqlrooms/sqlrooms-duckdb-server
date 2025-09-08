@@ -114,6 +114,33 @@ class RowCountResource:
 app.add_route("/row-count", RowCountResource())
 ```
 
+### Extend the built-in `handle_query` with a custom command
+
+You can intercept or add new `type` commands handled by the root `/` endpoint (HTTP/WS) using a `custom_handler` function supplied to `create_app`.
+
+Contract for `custom_handler(handler, cache, query, query_id)`:
+- Return `True` if you fully handled the request and already responded via `handler`.
+- Or return a dict shaped like `{"type": "done" | "json" | "arrow", "data"?: any}` and the server will send it.
+- Return `None`/`False` to fall back to the built-in commands.
+
+Example: add a `type: "ping"` command that returns JSON over HTTP/WS.
+
+```python
+from diskcache import Cache
+from pkg.server import create_app
+from pkg.db_async import init_global_connection
+
+def custom_handler(handler, cache, query, query_id):
+    if query.get("type") == "ping":
+        # Either respond directly using handler...
+        return {"type": "json", "data": "{\"ok\": true}"}
+    return False  # let built-ins handle others
+
+init_global_connection("/absolute/path/to/my.db")
+cache = Cache()
+app = create_app(cache, custom_handler=custom_handler)
+```
+
 ## Developer Setup
 
 We use [uv](https://docs.astral.sh/uv/) to manage our development setup.
