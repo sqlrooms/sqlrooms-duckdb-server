@@ -2,7 +2,7 @@
 
 [![PyPi](https://img.shields.io/pypi/v/sqlrooms-duckdb-server.svg)](https://pypi.org/project/sqlrooms-duckdb-server/)
 
-A Python-based DuckDB server for [SQLRooms](https://sqlrooms.org). The server runs a local DuckDB instance and supports queries over HTTP or Web Sockets, returning data in either [Apache Arrow](https://arrow.apache.org/) or JSON format. The server supports query cancellation.
+A Python-based DuckDB server for [SQLRooms](https://sqlrooms.org), built on FastAPI. The server runs a local DuckDB instance and supports queries over HTTP or Web Sockets, returning data in either [Apache Arrow](https://arrow.apache.org/) or JSON format. The server supports query cancellation.
 
 > **Note:** This server was initially created as a fork of [Mosaic DuckDB Server](https://github.com/uwdata/mosaic/tree/main/packages/server/duckdb-server), with additional features and improvements.
 
@@ -10,20 +10,20 @@ A Python-based DuckDB server for [SQLRooms](https://sqlrooms.org). The server ru
 
 ## Installation and usage
 
-We recommend running the server in an isolated environment with [uvx](https://docs.astral.sh/uv/). For example, to directly run the server, use:
+We recommend running the server in an isolated environment with [uvx](https://docs.astral.sh/uv/). For example, to directly run the server, use (database path required):
 
 ```bash
-uvx sqlrooms-duckdb-server
+uvx sqlrooms-duckdb-server --db-path /absolute/path/to/my.db
 ```
 
-Alternatively, you can install the server with `pip install sqlrooms-duckdb-server`. Then you can start the server with `sqlrooms-duckdb-server`.
+Alternatively, you can install the server with `pip install sqlrooms-duckdb-server`. Then you can start the server with `sqlrooms-duckdb-server --db-path /absolute/path/to/my.db`.
 
 ### Command-line Arguments
 
 The server accepts the following command-line arguments:
 
 - `--port`: Specify the port to listen on (default: 3000)
-- `--db-path`: Specify the path to the DuckDB database file (default: ./kepler-desktop.db)
+- `--db-path`: Specify the path to the DuckDB database file (required; no default)
 
 Example:
 
@@ -60,7 +60,7 @@ def main():
     # Create a cache for query results
     cache = Cache()
 
-    # Build the Falcon ASGI app that exposes the SQLRooms endpoints
+    # Build the FastAPI app that exposes the SQLRooms endpoints
     app = create_app(cache)
 
     # Run with uvicorn (or mount `app` into your larger ASGI application)
@@ -72,7 +72,7 @@ if __name__ == "__main__":
 
 ### Add custom endpoints
 
-The server uses Falcon ASGI under the hood. You can extend the app with additional routes/resources.
+The server uses FastAPI under the hood. You can extend the app with additional routes.
 
 Simple example:
 
@@ -80,11 +80,6 @@ Simple example:
 from diskcache import Cache
 from pkg.server import create_app
 from pkg.db_async import init_global_connection
-from falcon import Request, Response
-
-class HelloResource:
-    async def on_get(self, req: Request, resp: Response):
-        resp.media = {"hello": "world"}
 
 # Startup
 init_global_connection("/absolute/path/to/my.db")
@@ -92,26 +87,25 @@ cache = Cache()
 app = create_app(cache)
 
 # Add your custom route(s)
-app.add_route("/hello", HelloResource())
+@app.get("/hello")
+async def hello():
+    return {"hello": "world"}
 ```
 
 Running a DuckDB query inside your endpoint (using the shared connection and thread pool):
 
 ```python
 from pkg import db_async
-from falcon import Request, Response
 
-class RowCountResource:
-    async def on_get(self, req: Request, resp: Response):
-        # Execute synchronous DuckDB work off the event loop
-        def _count(cur):
-            return cur.execute("select count(*) from my_table").fetchone()[0]
+# Add an endpoint that runs a DuckDB query
+@app.get("/row-count")
+async def row_count():
+    # Execute synchronous DuckDB work off the event loop
+    def _count(cur):
+        return cur.execute("select count(*) from my_table").fetchone()[0]
 
-        count = await db_async.run_db_task(_count)
-        resp.media = {"table": "my_table", "row_count": count}
-
-# Register it
-app.add_route("/row-count", RowCountResource())
+    count = await db_async.run_db_task(_count)
+    return {"table": "my_table", "row_count": count}
 ```
 
 ### Extend the built-in `handle_query` with a custom command
@@ -145,7 +139,7 @@ app = create_app(cache, custom_handler=custom_handler)
 
 We use [uv](https://docs.astral.sh/uv/) to manage our development setup.
 
-Start the server with `uv run sqlrooms-duckdb-server`. The server will not restart when the code changes.
+Start the server with `uv run sqlrooms-duckdb-server --db-path /absolute/path/to/my.db`. The server will not restart when the code changes.
 
 Run `uv run ruff check --fix` and `uv run ruff format` to lint the code.
 
